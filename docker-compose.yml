@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  tcria:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tcria-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # API Configuration
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PORT: "8000"
+      
+      # TCRIA MCP Gateway Configuration
+      TCRIA_MCP_REQUIRE_AUTH: "${TCRIA_MCP_REQUIRE_AUTH:-true}"
+      TCRIA_MCP_JWT_SECRET: "${TCRIA_MCP_JWT_SECRET:?error}"
+      TCRIA_MCP_SIGNING_SECRET: "${TCRIA_MCP_SIGNING_SECRET:?error}"
+      TCRIA_MCP_PUBLIC_URL: "${TCRIA_MCP_PUBLIC_URL:-http://localhost:8000/mcp}"
+      
+      # Optional: OpenAI API (if using AI features)
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      
+      # Optional: GitHub integration
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      
+    volumes:
+      # Audit outputs - persist to host
+      - ./output:/app/output
+      # Optional: case data
+      - ./cases:/app/cases
+    
+    # Network configuration
+    networks:
+      - tcria-network
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=tcria"
+
+networks:
+  tcria-network:
+    driver: bridge
+
+volumes:
+  output:
+  cases:
