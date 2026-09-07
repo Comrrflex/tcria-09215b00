@@ -13,8 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
+# Copy project metadata + sources needed for editable install (-e .)
+COPY requirements.txt pyproject.toml README.md ./
+COPY tcria ./tcria
+COPY api ./api
+COPY app ./app
+COPY *.py ./
 RUN pip install --upgrade pip && \
     pip install --user -r requirements.txt
 
