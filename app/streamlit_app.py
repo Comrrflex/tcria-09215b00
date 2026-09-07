@@ -22,65 +22,6 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, cwd=str(REPO_ROOT))
 
 
-def _pretty_report_with_ai(audit_json: Path, out_md: Path) -> str:
-    """AI only at the end: turn the audit JSON into a short beautiful report. No AI in the trail."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("Defina OPENAI_API_KEY no Render para o relatório bonito com IA.")
-
-    from openai import OpenAI
-
-    payload = json.loads(audit_json.read_text(encoding="utf-8"))
-    # Keep prompt small: summary fields + top accusation items only
-    slim = {
-        "generated_at": payload.get("generated_at"),
-        "total_files_scanned": payload.get("total_files_scanned"),
-        "accusation_set_count": payload.get("accusation_set_count"),
-        "classification_counts": payload.get("classification_counts"),
-        "compliance_gate_mode": payload.get("compliance_gate_mode"),
-        "accusation_set": [
-            {
-                "file_name": r.get("file_name"),
-                "classification": r.get("classification"),
-                "overall_outcome": r.get("overall_outcome"),
-                "classification_reasons": r.get("classification_reasons"),
-                "gates": r.get("gates"),
-            }
-            for r in (payload.get("accusation_set") or [])[:40]
-        ],
-    }
-
-    client = OpenAI(api_key=api_key)
-    completion = client.chat.completions.create(
-        model=os.getenv("TCRIA_REPORT_MODEL", "gpt-4.1-mini"),
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Você escreve um relatório executivo curto e vendável em português do Brasil. "
-                    "Baseie-se SOMENTE no JSON de auditoria TCRIA. Não invente fatos. "
-                    "Estrutura fixa em Markdown:\n"
-                    "# Relatório executivo TCRIA\n"
-                    "## O que foi auditado\n"
-                    "## Onde a empresa erra (achados)\n"
-                    "## Por que isso importa\n"
-                    "## Próximos passos recomendados\n"
-                    "Tom: claro, técnico, sem juridiquês vazio. Máximo ~3 páginas."
-                ),
-            },
-            {
-                "role": "user",
-                "content": "Gere o relatório a partir deste JSON de auditoria:\n\n"
-                + json.dumps(slim, ensure_ascii=False, indent=2),
-            },
-        ],
-        temperature=0.2,
-    )
-    text = (completion.choices[0].message.content or "").strip()
-    if not text:
-        raise RuntimeError("A IA retornou relatório vazio.")
-    out_md.write_text(text + "\n", encoding="utf-8")
-    return text
 
 
 def render() -> None:
@@ -93,9 +34,9 @@ def render() -> None:
 **Para empresas desconfiadas de IA.** O motor é clássico: confronta documentos,
 datas, pedaços e sinais. Não inventa tese no meio do caminho.
 
-1. Você sobe o bundle  
-2. A trilha gera **JSON**, **MD** e **PDF**  
-3. Só no fim, se quiser, uma IA monta um **relatório bonito**
+1. Você sobe o bundle (~50 documentos)  
+2. A trilha (custódia + hash) gera **JSON**, **MD** e **PDF**  
+3. Daí vemos se alguém compra
         """
     )
     st.link_button("Quero comprar / falar no WhatsApp", WHATSAPP)
@@ -103,12 +44,6 @@ datas, pedaços e sinais. Não inventa tese no meio do caminho.
     st.divider()
     st.header("Demo")
     strict = st.checkbox("Modo strict (DecisionRecord explícito)", value=True)
-    use_ai = st.checkbox(
-        "No fim: gerar relatório bonito com IA (só depois da trilha)",
-        value=False,
-        help="Usa OPENAI_API_KEY. A IA não entra na auditoria — só resume o JSON.",
-    )
-
     up = st.file_uploader("Upload do ZIP com os documentos", type=["zip"])
     run = st.button("Rodar auditoria", type="primary", disabled=up is None)
 
@@ -188,22 +123,6 @@ datas, pedaços e sinais. Não inventa tese no meio do caminho.
             st.download_button("PDF técnico", data=pdf_out.read_bytes(), file_name=pdf_out.name, mime="application/pdf")
         else:
             st.write("PDF indisponível")
-
-    if use_ai:
-        pretty_path = OUT_DIR / f"{stem}{suffix}_relatorio_bonito.md"
-        try:
-            with st.spinner("IA só no fim — relatório bonito…"):
-                text = _pretty_report_with_ai(json_out, pretty_path)
-            st.subheader("Relatório bonito (IA no fim)")
-            st.markdown(text)
-            st.download_button(
-                "Baixar relatório bonito (.md)",
-                data=pretty_path.read_bytes(),
-                file_name=pretty_path.name,
-                mime="text/markdown",
-            )
-        except Exception as exc:  # noqa: BLE001 — show product error to buyer/demo
-            st.error(f"Relatório bonito não rodou: {exc}")
 
     st.divider()
     st.markdown(f"Pronto para usar na sua empresa? [Fale no WhatsApp]({WHATSAPP})")
