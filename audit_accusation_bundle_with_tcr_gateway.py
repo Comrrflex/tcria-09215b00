@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
-WORKSPACE = Path("/Users/rodrigobaptistadasilva/Documents/New project")
-DOWNLOADS = Path("/Users/rodrigobaptistadasilva/Downloads")
+# Repo-relative paths so the product runs on any machine / Render (not only the original Mac).
+WORKSPACE = Path(__file__).resolve().parent
+DOWNLOADS = Path.home() / "Downloads"
 OUTPUT_DIR = WORKSPACE / "output" / "audit"
 JSON_OUT = OUTPUT_DIR / "tcr_gateway_accusation_bundle_audit.json"
 MD_OUT = OUTPUT_DIR / "tcr_gateway_accusation_bundle_audit.md"
