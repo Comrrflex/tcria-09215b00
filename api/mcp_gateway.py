@@ -14,7 +14,7 @@ from typing import Any
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from tcria.engine import TCRIAEngine
@@ -165,6 +165,12 @@ async def audit_middleware(request: Request, call_next):
     except Exception as exc:
         _log_event("http_error", request, error=str(exc), duration_ms=round((time.time() - start) * 1000, 2))
         raise
+
+
+@app.get("/")
+def root() -> RedirectResponse:
+    """Send browsers hitting the service domain to interactive docs."""
+    return RedirectResponse(url="/docs", status_code=307)
 
 
 @app.get("/health")
