@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+COPY requirements-web.txt .
+RUN pip install --upgrade pip && pip install -r requirements-web.txt
 
 COPY . .
 
@@ -25,7 +25,5 @@ RUN mkdir -p /app/output/audit /app/output/_uploads \
     && chown -R tcria:tcria /app
 
 USER tcria
-
 EXPOSE 10000
-
 CMD streamlit run app.py --server.port=${PORT} --server.address=0.0.0.0 --server.headless=true
