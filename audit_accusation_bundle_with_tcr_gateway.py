@@ -307,6 +307,9 @@ def decode_bytes(raw: bytes) -> Tuple[str, str]:
 
 
 def extract_text_with_textutil(path: Path) -> Tuple[str, str, str]:
+    """macOS-only helper kept as last resort for .rtf/.webarchive."""
+    if not shutil.which("textutil"):
+        return "", "error", "textutil_missing"
     cp = subprocess.run(
         ["textutil", "-convert", "txt", "-stdout", str(path)],
         capture_output=True,
@@ -315,6 +318,76 @@ def extract_text_with_textutil(path: Path) -> Tuple[str, str, str]:
     if cp.returncode != 0:
         return "", "error", "textutil"
     return cp.stdout or "", "ok", "textutil"
+
+
+def extract_text_from_docx(path: Path) -> Tuple[str, str, str]:
+    try:
+        from docx import Document  # type: ignore
+    except Exception:
+        # Fall back to macOS textutil when python-docx is unavailable.
+        return extract_text_with_textutil(path)
+    try:
+        doc = Document(str(path))
+        parts: List[str] = []
+        for para in doc.paragraphs:
+            if para.text and para.text.strip():
+                parts.append(para.text)
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text and c.text.strip()]
+                if cells:
+                    parts.append(" | ".join(cells))
+        return "\n".join(parts), "ok", "python_docx"
+    except Exception:
+        return "", "error", "python_docx"
+
+
+def _ocr_image_file(target_path: Path) -> Tuple[str, str, str]:
+    if not shutil.which("tesseract"):
+        return "", "ocr_unavailable", "tesseract_missing"
+    cp = subprocess.run(
+        ["tesseract", str(target_path), "stdout", "-l", "por+eng"],
+        capture_output=True,
+        text=True,
+    )
+    if cp.returncode != 0:
+        cp2 = subprocess.run(["tesseract", str(target_path), "stdout"], capture_output=True, text=True)
+        if cp2.returncode != 0:
+            return "", "error", "tesseract"
+        return cp2.stdout or "", "ok", "tesseract"
+    return cp.stdout or "", "ok", "tesseract"
+
+
+def extract_text_from_pdf_ocr(path: Path, max_pages: int = 25) -> Tuple[str, str, str]:
+    """OCR fallback for scanned PDFs (empty digital text layer)."""
+    if not shutil.which("tesseract"):
+        return "", "ocr_unavailable", "tesseract_missing"
+    try:
+        from pdf2image import convert_from_path  # type: ignore
+    except Exception:
+        return "", "ocr_unavailable", "pdf2image_missing"
+    try:
+        images = convert_from_path(str(path), dpi=200, first_page=1, last_page=max_pages)
+    except Exception:
+        return "", "error", "pdf2image"
+    chunks: List[str] = []
+    for idx, image in enumerate(images, start=1):
+        fd, tmp_name = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            image.save(tmp, format="PNG")
+            text, status, method = _ocr_image_file(tmp)
+            if status == "ok" and text.strip():
+                chunks.append(f"[page {idx}]\n{text}")
+            elif status == "ocr_unavailable":
+                return "", status, method
+        finally:
+            tmp.unlink(missing_ok=True)
+    joined = "\n\n".join(chunks).strip()
+    if not joined:
+        return "", "ok", "tesseract_pdf_empty"
+    return joined, "ok", "tesseract_pdf"
 
 
 def extract_text_from_pdf(path: Path) -> Tuple[str, str, str]:
@@ -330,6 +403,8 @@ def extract_text_from_pdf(path: Path) -> Tuple[str, str, str]:
     except FileNotFoundError:
         pdftotext = None
 
+    digital = ""
+    digital_method = "pypdf"
     try:
         from pypdf import PdfReader  # type: ignore
 
@@ -337,18 +412,25 @@ def extract_text_from_pdf(path: Path) -> Tuple[str, str, str]:
         pages = []
         for page in reader.pages:
             pages.append(page.extract_text() or "")
-        text = "\n".join(pages)
-        return text, "ok", "pypdf"
+        digital = "\n".join(pages)
+        if digital.strip():
+            return digital, "ok", "pypdf"
     except Exception:
-        if pdftotext is not None and pdftotext.returncode != 0:
-            return "", "error", "pdftotext"
-        if pdftotext is None:
-            return "", "error", "pdf_no_extractor"
-        return "", "ok", "pdftotext"
+        digital = ""
+        digital_method = "pypdf_error"
+
+    # Scanned / empty text layer → OCR
+    ocr_text, ocr_status, ocr_method = extract_text_from_pdf_ocr(path)
+    if ocr_status == "ok" and ocr_text.strip():
+        return ocr_text, "ok", ocr_method
+    if ocr_status == "ocr_unavailable":
+        return digital, "ocr_unavailable", ocr_method
+    if digital_method == "pypdf_error" and pdftotext is None:
+        return "", "error", "pdf_no_extractor"
+    return digital, "ok", digital_method or "pypdf"
 
 
 def extract_text_from_image(path: Path) -> Tuple[str, str, str]:
-    # Optional local OCR via tesseract. If unavailable, classify as OCR-unavailable without crashing the batch.
     target_path = path
     cleanup_tmp: Optional[Path] = None
 
@@ -374,27 +456,11 @@ def extract_text_from_image(path: Path) -> Tuple[str, str, str]:
                 pass
 
     try:
-        cp = subprocess.run(
-            ["tesseract", str(target_path), "stdout", "-l", "por+eng"],
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError:
+        text, status, method = _ocr_image_file(target_path)
+        return text, status, method
+    finally:
         if cleanup_tmp and cleanup_tmp.exists():
             cleanup_tmp.unlink(missing_ok=True)
-        return "", "ocr_unavailable", "tesseract_missing"
-
-    if cp.returncode != 0:
-        # Try without language pack selection as a fallback.
-        cp2 = subprocess.run(["tesseract", str(target_path), "stdout"], capture_output=True, text=True)
-        if cleanup_tmp and cleanup_tmp.exists():
-            cleanup_tmp.unlink(missing_ok=True)
-        if cp2.returncode != 0:
-            return "", "error", "tesseract"
-        return cp2.stdout or "", "ok", "tesseract"
-    if cleanup_tmp and cleanup_tmp.exists():
-        cleanup_tmp.unlink(missing_ok=True)
-    return cp.stdout or "", "ok", "tesseract"
 
 
 def extract_text(path: Path) -> Tuple[str, str, str]:
@@ -402,7 +468,10 @@ def extract_text(path: Path) -> Tuple[str, str, str]:
     if path.name.lower() in SENSITIVE_FILENAMES:
         return "", "skipped_sensitive", "none"
 
-    if suffix in {".docx", ".rtf", ".webarchive"}:
+    if suffix == ".docx":
+        return extract_text_from_docx(path)
+
+    if suffix in {".rtf", ".webarchive"}:
         return extract_text_with_textutil(path)
 
     if suffix in {".txt", ".csv", ".md"}:
