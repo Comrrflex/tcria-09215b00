@@ -261,10 +261,12 @@ def resolve_input_paths(inputs: Optional[List[str]]) -> List[Path]:
             continue
         if p.is_dir():
             for child in sorted(p.rglob("*")):
-                if child.is_file() and child.suffix.lower() in SUPPORTED_SUFFIXES and child not in seen:
+                # Every file enters custody. Unsupported extraction is a recorded result,
+                # never a reason to disappear from the audit trail.
+                if child.is_file() and child not in seen:
                     seen.append(child)
             continue
-        if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES and p not in seen:
+        if p.is_file() and p not in seen:
             seen.append(p)
     return sorted(seen, key=lambda path: (path.name.lower(), str(path).lower()))
 
@@ -1207,9 +1209,7 @@ def main() -> int:
         payload["extension_counts"] = dict(sorted(ext_counts.items(), key=lambda kv: (-kv[1], kv[0])))
         payload["sample_filenames"] = sample_names
         payload["operator_message"] = (
-            "Nenhum arquivo com tipo suportado foi encontrado no ZIP/pasta. "
-            "A trilha nao falhou por OCR — os arquivos presentes nao entram no escopo documental "
-            f"(suportados: {', '.join(sorted(SUPPORTED_SUFFIXES))})."
+            "Nenhum arquivo foi encontrado no ZIP/pasta. A trilha so fica vazia quando o input esta realmente vazio."
         )
 
     if args.output_stem:
