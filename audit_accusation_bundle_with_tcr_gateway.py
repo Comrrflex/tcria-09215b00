@@ -56,7 +56,12 @@ EXACT_FILES = [
 ]
 
 SENSITIVE_FILENAMES = {"senhas.csv"}
-SUPPORTED_SUFFIXES = {".pdf", ".docx", ".rtf", ".webarchive", ".txt", ".csv", ".md", ".png", ".jpg", ".jpeg", ".heic"}
+SUPPORTED_SUFFIXES = {
+    ".pdf", ".docx", ".doc", ".rtf", ".webarchive",
+    ".txt", ".csv", ".md", ".json", ".html", ".htm", ".xml", ".eml",
+    ".png", ".jpg", ".jpeg", ".heic", ".webp", ".gif", ".tif", ".tiff", ".bmp",
+    ".xlsx", ".xls",
+}
 
 # Project-derived prescriptive gate (from the RTF).
 PRESCRIPTIVE_PATTERNS = [
@@ -474,7 +479,7 @@ def extract_text(path: Path) -> Tuple[str, str, str]:
     if suffix in {".rtf", ".webarchive"}:
         return extract_text_with_textutil(path)
 
-    if suffix in {".txt", ".csv", ".md"}:
+    if suffix in {".txt", ".csv", ".md", ".json", ".html", ".htm", ".xml", ".eml"}:
         raw = path.read_bytes()
         text, enc = decode_bytes(raw)
         return text, "ok", enc
@@ -482,8 +487,24 @@ def extract_text(path: Path) -> Tuple[str, str, str]:
     if suffix == ".pdf":
         return extract_text_from_pdf(path)
 
-    if suffix in {".png", ".jpg", ".jpeg", ".heic"}:
+    if suffix in {".png", ".jpg", ".jpeg", ".heic", ".webp", ".gif", ".tif", ".tiff", ".bmp"}:
         return extract_text_from_image(path)
+
+    if suffix in {".xlsx", ".xls"}:
+        try:
+            from openpyxl import load_workbook  # type: ignore
+            wb = load_workbook(str(path), read_only=True, data_only=True)
+            rows = []
+            for ws in wb.worksheets[:5]:
+                for i, row in enumerate(ws.iter_rows(values_only=True)):
+                    if i > 200:
+                        break
+                    cells = [str(c) for c in row if c is not None]
+                    if cells:
+                        rows.append(" | ".join(cells))
+            return "\n".join(rows), "ok", "openpyxl"
+        except Exception:
+            return "", "error", "openpyxl"
 
     return "", "unsupported", "none"
 
@@ -977,6 +998,19 @@ def build_markdown(payload: Dict[str, object]) -> str:
     lines.append(f"- Arquivos varridos: `{payload['total_files_scanned']}`")
     lines.append(f"- Arquivos no conjunto acusatorio auditado: `{payload['accusation_set_count']}`")
     lines.append(f"- Contagens por classificacao: `{payload['classification_counts']}`")
+    if payload.get("trail_status") == "no_supported_documents":
+        lines.append(f"- Status da trilha: `{payload.get('trail_status')}`")
+        lines.append(f"- Total de arquivos recebidos: `{payload.get('total_files_in_input', 0)}`")
+        lines.append(f"- Extensoes recebidas: `{payload.get('extension_counts', {})}`")
+        lines.append("")
+        lines.append("## Diagnostico do input")
+        lines.append("")
+        lines.append(str(payload.get("operator_message", "Nenhum documento suportado encontrado.")))
+        lines.append("")
+        if payload.get("sample_filenames"):
+            lines.append("Arquivos de exemplo recebidos:")
+            for name in payload.get("sample_filenames", []):
+                lines.append(f"- `{name}`")
     lines.append("")
     lines.append("## Resultado resumido (conjunto acusatorio)")
     lines.append("")
@@ -1049,8 +1083,19 @@ def main() -> int:
     mode = AuditMode(strict_explicit_decision_record=args.strict)
     run_generated_at = datetime.now().isoformat(timespec="seconds")
     files = resolve_input_paths(args.paths)
+    inventory_only = False
     if not files:
-        raise SystemExit("No files discovered for the configured scope.")
+        inventory_only = True
+        # Still produce auditable outputs: inventory of what was uploaded vs supported types.
+        scanned_paths: List[Path] = []
+        for raw in args.paths or []:
+            root = Path(raw).expanduser()
+            if root.is_dir():
+                scanned_paths.extend([c for c in sorted(root.rglob("*")) if c.is_file()])
+            elif root.is_file():
+                scanned_paths.append(root)
+        # Build synthetic empty run with inventory in payload later
+        files = []
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1146,7 +1191,26 @@ def main() -> int:
         "classification_counts": counts,
         "accusation_set": accusation_set,
         "non_accusation_set": non_accusation_set,
+        "supported_suffixes": sorted(SUPPORTED_SUFFIXES),
     }
+
+    if inventory_only:
+        from collections import Counter
+        ext_counts = Counter()
+        sample_names = []
+        for sp in scanned_paths:
+            ext_counts[sp.suffix.lower() or "(sem_extensao)"] += 1
+            if len(sample_names) < 40:
+                sample_names.append(str(sp.name))
+        payload["trail_status"] = "no_supported_documents"
+        payload["total_files_in_input"] = len(scanned_paths)
+        payload["extension_counts"] = dict(sorted(ext_counts.items(), key=lambda kv: (-kv[1], kv[0])))
+        payload["sample_filenames"] = sample_names
+        payload["operator_message"] = (
+            "Nenhum arquivo com tipo suportado foi encontrado no ZIP/pasta. "
+            "A trilha nao falhou por OCR — os arquivos presentes nao entram no escopo documental "
+            f"(suportados: {', '.join(sorted(SUPPORTED_SUFFIXES))})."
+        )
 
     if args.output_stem:
         stem = args.output_stem + ("_strict" if mode.strict_explicit_decision_record else "")
@@ -1164,6 +1228,11 @@ def main() -> int:
     print(f"Markdown report: {md_out}")
     print(f"Total scanned: {len(records)}")
     print(f"Accusation set: {len(accusation_set)}")
+    if inventory_only:
+        print("Trail status: no_supported_documents")
+        print(f"Files in input: {payload.get('total_files_in_input')}")
+        print(f"Extensions: {payload.get('extension_counts')}")
+        print(payload.get("operator_message"))
     for rec in accusation_set:
         print(f"- {rec['file_name']}: {rec['overall_outcome']}")
     return 0
