@@ -365,36 +365,66 @@ def _ocr_image_file(target_path: Path) -> Tuple[str, str, str]:
     return cp.stdout or "", "ok", "tesseract"
 
 
-def extract_text_from_pdf_ocr(path: Path, max_pages: int = 25) -> Tuple[str, str, str]:
-    """OCR fallback for scanned PDFs (empty digital text layer)."""
+def extract_text_from_pdf_ocr(path: Path) -> Tuple[str, str, str]:
+    """OCR scanned PDFs page-by-page. OCR is required, never a cosmetic extra."""
     if not shutil.which("tesseract"):
         return "", "ocr_unavailable", "tesseract_missing"
     try:
-        from pdf2image import convert_from_path  # type: ignore
+        from pdf2image import convert_from_path, pdfinfo_from_path  # type: ignore
     except Exception:
         return "", "ocr_unavailable", "pdf2image_missing"
+
     try:
-        images = convert_from_path(str(path), dpi=200, first_page=1, last_page=max_pages)
+        info = pdfinfo_from_path(str(path))
+        total_pages = int(info.get("Pages") or 0)
     except Exception:
-        return "", "error", "pdf2image"
+        return "", "error", "pdfinfo"
+
+    if total_pages <= 0:
+        return "", "error", "pdf_no_pages"
+
+    # 0/empty means all pages. An operator may cap only by explicit env var.
+    max_pages_raw = os.getenv("TCRIA_OCR_MAX_PAGES", "0").strip()
+    try:
+        max_pages = int(max_pages_raw or "0")
+    except ValueError:
+        max_pages = 0
+    pages_to_scan = total_pages if max_pages <= 0 else min(total_pages, max_pages)
+
     chunks: List[str] = []
-    for idx, image in enumerate(images, start=1):
+    for page_no in range(1, pages_to_scan + 1):
+        try:
+            images = convert_from_path(
+                str(path), dpi=200, first_page=page_no, last_page=page_no,
+                fmt="png", thread_count=1,
+            )
+        except Exception:
+            chunks.append(f"[page {page_no}] OCR_RENDER_ERROR")
+            continue
+        if not images:
+            chunks.append(f"[page {page_no}] OCR_RENDER_EMPTY")
+            continue
+
         fd, tmp_name = tempfile.mkstemp(suffix=".png")
         os.close(fd)
         tmp = Path(tmp_name)
         try:
-            image.save(tmp, format="PNG")
-            text, status, method = _ocr_image_file(tmp)
-            if status == "ok" and text.strip():
-                chunks.append(f"[page {idx}]\n{text}")
+            images[0].save(tmp, format="PNG")
+            page_text, status, method = _ocr_image_file(tmp)
+            if status == "ok" and page_text.strip():
+                chunks.append(f"[page {page_no}]\n{page_text}")
             elif status == "ocr_unavailable":
                 return "", status, method
+            else:
+                chunks.append(f"[page {page_no}] OCR_EMPTY_OR_ERROR")
         finally:
             tmp.unlink(missing_ok=True)
+
     joined = "\n\n".join(chunks).strip()
     if not joined:
         return "", "ok", "tesseract_pdf_empty"
-    return joined, "ok", "tesseract_pdf"
+    method = f"tesseract_pdf_pages_{pages_to_scan}_of_{total_pages}"
+    return joined, "ok", method
 
 
 def extract_text_from_pdf(path: Path) -> Tuple[str, str, str]:
